@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,15 +36,30 @@ func Index(folder string) error {
 		folder = checkpoint
 	}
 
-	// Get root folder information.
-	info, err := os.Stat(folder)
-	if err != nil {
+	// Find total folder size.
+	total := int64(0)
+	if err := filepath.WalkDir(folder, func(relativePath string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !entry.IsDir() {
+			// Get file or folder information.
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+
+			total += info.Size()
+		}
+
+		return err
+	}); err != nil {
 		return err
 	}
+	fmt.Printf("Folder size: %s\n", humanizeBytes(total))
 
-	// Track progress.
-	total := info.Size()
-	progress := progressbar.NewOptions64(total,
+	indexingProgress := progressbar.NewOptions64(total,
 		progressbar.OptionSetDescription("Indexing files..."),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(15),
@@ -93,7 +109,7 @@ func Index(folder string) error {
 			// TODO: Get file creation time for images from EXIF.
 
 			// Update progress.
-			progress.Add64(file.Size)
+			indexingProgress.Add64(file.Size)
 		}
 
 		// TODO: Set file or folder parent.
@@ -109,7 +125,7 @@ func Index(folder string) error {
 	}
 
 	// Update progress.
-	progress.Set64(total)
+	indexingProgress.Set64(total)
 	fmt.Println()
 
 	return nil
@@ -140,4 +156,12 @@ func Hash(path string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+// humanizeBytes returns a human-readable string of the specified size.
+func humanizeBytes(size int64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"}
+	unit := math.Floor(math.Log2(float64(size)) / 10)
+
+	return fmt.Sprintf("%.2f %s", float64(size)/math.Pow(2, unit*10), units[int(unit)])
 }
