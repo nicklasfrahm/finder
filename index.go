@@ -148,10 +148,11 @@ func Hash(path string) (string, error) {
 	defer file.Close()
 
 	// Create hash without loading entire file into memory.
-	// io.Copy will read the file in chunks if 32KiB and
+	// io.Copy will read the file in chunks of 128KiB and
 	// update the hash for every chunk.
 	hash := sha512.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	buf := make([]byte, 128*1024)
+	if _, err := io.CopyBuffer(hash, file, buf); err != nil {
 		return "", err
 	}
 
