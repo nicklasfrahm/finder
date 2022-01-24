@@ -8,13 +8,21 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/schollz/progressbar/v3"
+	"golang.org/x/net/context"
 )
+
+// IndexJob represents a job to index a file or folder.
+type IndexJob struct {
+	Path  string
+	Entry fs.DirEntry
+}
 
 // Index builds an index of all files and folders in the specified directory.
 func Index(folder string) error {
@@ -37,33 +45,36 @@ func Index(folder string) error {
 	}
 
 	// Find total folder size.
-	total := int64(0)
-	if err := filepath.WalkDir(folder, func(relativePath string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !entry.IsDir() {
-			// Get file or folder information.
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-
-			total += info.Size()
-		}
-
-		return err
-	}); err != nil {
+	total, err := FolderSize(folder)
+	if err != nil {
 		return err
 	}
 	fmt.Printf("Folder size: %s\n", humanizeBytes(total))
 
-	indexingProgress := progressbar.NewOptions64(total,
+	progress := progressbar.NewOptions64(total,
 		progressbar.OptionSetDescription("Indexing files..."),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(15),
 	)
+
+	// Create pool of workers.
+	jobs := make(chan IndexJob, runtime.NumCPU())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go func() {
+			for {
+				select {
+				case job := <-jobs:
+					if err := IndexFile(db, &job, progress); err != nil {
+						fmt.Println(err)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	// Walk directories to build index.
 	if err := filepath.WalkDir(folder, func(relativePath string, entry fs.DirEntry, err error) error {
@@ -71,52 +82,10 @@ func Index(folder string) error {
 			return err
 		}
 
-		// Get absolute path.
-		path, err := filepath.Abs(relativePath)
-		if err != nil {
-			return err
-		}
-		file := NewFile(path)
-
-		// Get file or folder information.
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-
-		// Set file or folder information.
-		file.Size = info.Size()
-		file.IsDir = info.IsDir()
-		file.TimeModified = info.ModTime()
-		file.TimeIndexed = time.Now()
-
-		// Get additional information for files.
-		if !file.IsDir {
-			// Detect MIME type.
-			mtype, err := mimetype.DetectFile(path)
-			if err != nil {
-				return err
-			}
-			file.MIMEType.String = mtype.String()
-
-			// Get file hash.
-			hash, err := Hash(path)
-			if err != nil {
-				return err
-			}
-			file.Hash.String = hash
-
-			// TODO: Get file creation time for images from EXIF.
-
-			// Update progress.
-			indexingProgress.Add64(file.Size)
-		}
-
-		// TODO: Set file or folder parent.
-
-		// Persist file or folder information.
-		if err := file.Persist(db); err != nil {
-			return err
+		// Process indexing job.
+		jobs <- IndexJob{
+			Path:  relativePath,
+			Entry: entry,
 		}
 
 		return nil
@@ -124,11 +93,67 @@ func Index(folder string) error {
 		return err
 	}
 
+	// Shut down workers and close channels.
+	cancel()
+	close(jobs)
+
 	// Update progress.
-	indexingProgress.Set64(total)
+	progress.Set64(total)
 	fmt.Println()
 
 	return nil
+}
+
+// IndexFile indexes a file for a given IndexJob.
+func IndexFile(db *sqlx.DB, job *IndexJob, progress *progressbar.ProgressBar) error {
+	// Get absolute path.
+	path, err := filepath.Abs(job.Path)
+	if err != nil {
+		return err
+	}
+	file := NewFile(path)
+
+	// Get file or folder information.
+	info, err := job.Entry.Info()
+	if err != nil {
+		return err
+	}
+
+	// Set file or folder information.
+	file.Size = info.Size()
+	file.IsDir = info.IsDir()
+	file.TimeModified = info.ModTime()
+	file.TimeIndexed = time.Now()
+
+	// Get additional information for files.
+	if !file.IsDir {
+		// TODO: Pipe file content into mimetype detection
+		// and hasher to avoid loading entire file into memory twice.
+
+		// Detect MIME type.
+		mtype, err := mimetype.DetectFile(path)
+		if err != nil {
+			return err
+		}
+		file.MIMEType.String = mtype.String()
+
+		// Get file hash.
+		hash, err := Hash(path)
+		if err != nil {
+			return err
+		}
+		file.Hash.String = hash
+
+		// TODO: Get file creation time for images from EXIF.
+
+		// Update progress.
+		progress.Add64(file.Size)
+	}
+
+	// TODO: Set file or folder parent.
+
+	// Persist file or folder information.
+	return file.Persist(db)
 }
 
 // Resume attempts to resume an indexing operation.
@@ -157,6 +182,35 @@ func Hash(path string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+// FolderSize returns the size of the specified folder.
+func FolderSize(folder string) (int64, error) {
+	size := int64(0)
+
+	// Walk directory to get individual file sizes.
+	if err := filepath.WalkDir(folder, func(relativePath string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !entry.IsDir() {
+			// Get file information.
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+
+			// Add file size to total.
+			size += info.Size()
+		}
+
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	return size, nil
 }
 
 // humanizeBytes returns a human-readable string of the specified size.
