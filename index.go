@@ -1,6 +1,7 @@
 package finder
 
 import (
+	"bytes"
 	"crypto/sha512"
 	"fmt"
 	"io"
@@ -127,22 +128,11 @@ func IndexFile(db *sqlx.DB, job *IndexJob, progress *progressbar.ProgressBar) er
 
 	// Get additional information for files.
 	if !file.IsDir {
-		// TODO: Pipe file content into mimetype detection
-		// and hasher to avoid loading entire file into memory twice.
-
-		// Detect MIME type.
-		mtype, err := mimetype.DetectFile(path)
+		// Process file by reading file only once from disk.
+		err := ProcessFileStream(file)
 		if err != nil {
 			return err
 		}
-		file.MIMEType.String = mtype.String()
-
-		// Get file hash.
-		hash, err := Hash(path)
-		if err != nil {
-			return err
-		}
-		file.Hash.String = hash
 
 		// TODO: Get file creation time for images from EXIF.
 
@@ -164,24 +154,42 @@ func Resume(db *sqlx.DB) string {
 	return ""
 }
 
-// Hash returns the hash of the file.
-func Hash(path string) (string, error) {
-	file, err := os.Open(path)
+// ProcessFileStream extracts file attributes
+// while only reading the file in once. Currently
+// it generates a SHA512 checksum of the file
+// contents and detects the MIME type.
+func ProcessFileStream(info *File) error {
+	// Create io.Reader by opening file.
+	file, err := os.Open(info.Path)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer file.Close()
 
-	// Create hash without loading entire file into memory.
-	// io.Copy will read the file in chunks of 128KiB and
-	// update the hash for every chunk.
+	// Create writers for processing.
 	hash := sha512.New()
-	buf := make([]byte, 128*1024)
-	if _, err := io.CopyBuffer(hash, file, buf); err != nil {
-		return "", err
+	mimeBuffer := new(bytes.Buffer)
+	fanout := io.MultiWriter(hash, mimeBuffer)
+
+	// Create hash without loading entire file into memory.
+	// io.Copy will read the file in chunks of the specified
+	// and update the io.Writer for every chunk.
+	buf := make([]byte, 64*1024)
+	if _, err := io.CopyBuffer(fanout, file, buf); err != nil {
+		return err
 	}
 
-	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+	// Get MIME type.
+	mtype, err := mimetype.DetectReader(mimeBuffer)
+	if err != nil {
+		return err
+	}
+
+	// Set file attributes.
+	info.Hash.String = fmt.Sprintf("%x", hash.Sum(nil))
+	info.MIMEType.String = mtype.String()
+
+	return nil
 }
 
 // FolderSize returns the size of the specified folder.
