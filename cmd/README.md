@@ -11,11 +11,11 @@ A desktop application using WebViews and Svelte to provide a graphical user inte
 During development, you can start the development server as shown below.
 
 ```bash
-pushd web && npm run dev
+cd /web && npm run dev
 ```
 
 Then, open a second terminal and run the following command.
 
 ```bash
-make watch WEB_URL=http://localhost:3000 TARGET=bin/app-linux-amd64
+make watch URL=http://localhost:3000 TARGET=bin/app-linux-amd64
 ```
