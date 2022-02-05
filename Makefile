@@ -7,9 +7,9 @@ TARGET	:= finder
 
 .PHONY: all clean
 
-all: bin/$(TARGET)
+all: bin/$(TARGET)-$(GOOS)-$(GOARCH)
 
-bin/$(TARGET): $(SOURCES)
+bin/$(TARGET)-$(GOOS)-$(GOARCH): $(SOURCES)
 	-mkdir -p bin
 	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=1 CC=$(CC) $(GO) build -o bin/$(TARGET)-$(GOOS)-$(GOARCH) cmd/$(TARGET)/*
 
